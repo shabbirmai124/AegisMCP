@@ -1,7 +1,10 @@
 /target/
+crates/*/target/
 /.cache/
 audit.db
 audit.db-wal
 audit.db-shm
 *.cwasm
+*.cwasm.sha256
 .DS_Store
+Thumbs.db

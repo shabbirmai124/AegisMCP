@@ -1,36 +1,42 @@
-[engine]
-guest_js_wasm = "target/wasm32-wasip1/release/aegis-guest-js.wasm"
+[server]
+db_path = "audit.db"
 cache_dir = ".cache/cwasm"
-audit_db = "audit.db"
+guest_wasm_path = "target/wasm32-wasip1/release/aegis-guest-js.wasm"
 epoch_tick_ms = 10
-fuel_yield_interval = 100_000
 max_output_bytes = 1_048_576
 
 [tiers.pure_compute]
-max_memory_bytes = 16_777_216
-max_table_elements = 10_000
+max_memory_mb = 16
 max_fuel = 20_000_000
 max_epoch_ticks = 200
+max_table_elements = 10_000
+allow_fs = false
+allow_net = false
 
 [tiers.scoped_scratchpad]
-max_memory_bytes = 33_554_432
-max_table_elements = 10_000
+max_memory_mb = 32
 max_fuel = 40_000_000
 max_epoch_ticks = 500
-scratchpad_quota_bytes = 4_194_304
+max_table_elements = 10_000
+max_scratch_bytes = 4_194_304
+allow_net = false
 
 [tiers.readonly_data]
-max_memory_bytes = 33_554_432
-max_table_elements = 10_000
+max_memory_mb = 32
 max_fuel = 50_000_000
 max_epoch_ticks = 500
-readonly_roots = ["./data"]
+max_table_elements = 10_000
+readonly_roots = []
+allow_net = false
 
 [tiers.allowlisted_net]
-max_memory_bytes = 33_554_432
-max_table_elements = 10_000
+max_memory_mb = 32
 max_fuel = 50_000_000
 max_epoch_ticks = 800
-https_only = true
+max_table_elements = 10_000
+allowed_domains = ["api.github.com"]
+allow_http_plaintext = false
 max_response_bytes = 1_048_576
-allowed_domains = ["api.github.com", "registry.npmjs.org", "crates.io"]
+request_timeout_ms = 3000
+
+[plugins]

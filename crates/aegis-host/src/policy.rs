@@ -16,6 +16,17 @@ pub enum PolicyTier {
     AllowlistedNet,
 }
 
+impl PolicyTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PureCompute => "pure_compute",
+            Self::ScopedScratchpad => "scoped_scratchpad",
+            Self::ReadonlyData => "readonly_data",
+            Self::AllowlistedNet => "allowlisted_net",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SandboxPolicy {
     pub tier: PolicyTier,
@@ -24,11 +35,12 @@ pub struct SandboxPolicy {
     pub max_fuel: u64,
     pub max_epoch_ticks: u64,
     pub max_output_bytes: usize,
-    pub scratchpad_quota_bytes: usize,
+    pub max_scratch_bytes: usize,
     pub readonly_roots: Vec<PathBuf>,
     pub allowed_domains: Vec<String>,
-    pub https_only: bool,
+    pub allow_http_plaintext: bool,
     pub max_response_bytes: usize,
+    pub request_timeout_ms: u64,
 }
 
 impl SandboxPolicy {
@@ -36,60 +48,103 @@ impl SandboxPolicy {
         match tier {
             PolicyTier::PureCompute => Self {
                 tier,
-                max_memory_bytes: cfg.tiers.pure_compute.max_memory_bytes,
+                max_memory_bytes: (cfg.tiers.pure_compute.max_memory_mb as usize) * 1024 * 1024,
                 max_table_elements: cfg.tiers.pure_compute.max_table_elements,
                 max_fuel: cfg.tiers.pure_compute.max_fuel,
                 max_epoch_ticks: cfg.tiers.pure_compute.max_epoch_ticks,
-                max_output_bytes: cfg.engine.max_output_bytes,
-                scratchpad_quota_bytes: 0,
+                max_output_bytes: cfg.server.max_output_bytes,
+                max_scratch_bytes: 0,
                 readonly_roots: Vec::new(),
                 allowed_domains: Vec::new(),
-                https_only: true,
+                allow_http_plaintext: false,
                 max_response_bytes: 0,
+                request_timeout_ms: 0,
             },
             PolicyTier::ScopedScratchpad => Self {
                 tier,
-                max_memory_bytes: cfg.tiers.scoped_scratchpad.max_memory_bytes,
+                max_memory_bytes: (cfg.tiers.scoped_scratchpad.max_memory_mb as usize)
+                    * 1024
+                    * 1024,
                 max_table_elements: cfg.tiers.scoped_scratchpad.max_table_elements,
                 max_fuel: cfg.tiers.scoped_scratchpad.max_fuel,
                 max_epoch_ticks: cfg.tiers.scoped_scratchpad.max_epoch_ticks,
-                max_output_bytes: cfg.engine.max_output_bytes,
-                scratchpad_quota_bytes: cfg.tiers.scoped_scratchpad.scratchpad_quota_bytes,
+                max_output_bytes: cfg.server.max_output_bytes,
+                max_scratch_bytes: cfg.tiers.scoped_scratchpad.max_scratch_bytes,
                 readonly_roots: Vec::new(),
                 allowed_domains: Vec::new(),
-                https_only: true,
+                allow_http_plaintext: false,
                 max_response_bytes: 0,
+                request_timeout_ms: 0,
             },
             PolicyTier::ReadonlyData => Self {
                 tier,
-                max_memory_bytes: cfg.tiers.readonly_data.max_memory_bytes,
+                max_memory_bytes: (cfg.tiers.readonly_data.max_memory_mb as usize) * 1024 * 1024,
                 max_table_elements: cfg.tiers.readonly_data.max_table_elements,
                 max_fuel: cfg.tiers.readonly_data.max_fuel,
                 max_epoch_ticks: cfg.tiers.readonly_data.max_epoch_ticks,
-                max_output_bytes: cfg.engine.max_output_bytes,
-                scratchpad_quota_bytes: 0,
+                max_output_bytes: cfg.server.max_output_bytes,
+                max_scratch_bytes: 0,
                 readonly_roots: cfg.tiers.readonly_data.readonly_roots.clone(),
                 allowed_domains: Vec::new(),
-                https_only: true,
+                allow_http_plaintext: false,
                 max_response_bytes: 0,
+                request_timeout_ms: 0,
             },
             PolicyTier::AllowlistedNet => Self {
                 tier,
-                max_memory_bytes: cfg.tiers.allowlisted_net.max_memory_bytes,
+                max_memory_bytes: (cfg.tiers.allowlisted_net.max_memory_mb as usize) * 1024 * 1024,
                 max_table_elements: cfg.tiers.allowlisted_net.max_table_elements,
                 max_fuel: cfg.tiers.allowlisted_net.max_fuel,
                 max_epoch_ticks: cfg.tiers.allowlisted_net.max_epoch_ticks,
-                max_output_bytes: cfg.engine.max_output_bytes,
-                scratchpad_quota_bytes: 0,
+                max_output_bytes: cfg.server.max_output_bytes,
+                max_scratch_bytes: 0,
                 readonly_roots: Vec::new(),
                 allowed_domains: cfg.tiers.allowlisted_net.allowed_domains.clone(),
-                https_only: cfg.tiers.allowlisted_net.https_only,
+                allow_http_plaintext: cfg.tiers.allowlisted_net.allow_http_plaintext,
                 max_response_bytes: cfg.tiers.allowlisted_net.max_response_bytes,
+                request_timeout_ms: cfg.tiers.allowlisted_net.request_timeout_ms,
             },
         }
     }
 
+    /// Callers may tighten limits strictly below the configured tier ceiling, never raise them.
+    pub fn with_overrides(
+        mut self,
+        memory_mb: Option<u64>,
+        fuel_budget: Option<u64>,
+    ) -> Result<Self, AegisError> {
+        if let Some(mb) = memory_mb {
+            let requested_bytes = (mb as usize).saturating_mul(1024 * 1024);
+            if requested_bytes < 65_536 || requested_bytes > self.max_memory_bytes {
+                return Err(AegisError::PolicyViolation(format!(
+                    "Requested memory_mb ({mb} MiB) exceeds tier '{}' ceiling ({} MiB) or is < 1 MiB",
+                    self.tier.as_str(),
+                    self.max_memory_bytes / (1024 * 1024)
+                )));
+            }
+            self.max_memory_bytes = requested_bytes;
+        }
+
+        if let Some(fuel) = fuel_budget {
+            if fuel == 0 || fuel > self.max_fuel {
+                return Err(AegisError::PolicyViolation(format!(
+                    "Requested fuel_budget ({fuel}) exceeds tier '{}' ceiling ({}) or is 0",
+                    self.tier.as_str(),
+                    self.max_fuel
+                )));
+            }
+            self.max_fuel = fuel;
+        }
+
+        Ok(self)
+    }
+
     pub fn validate_readonly_mount(&self, requested: &Path) -> Result<PathBuf, AegisError> {
+        if self.tier != PolicyTier::ReadonlyData {
+            return Err(AegisError::PolicyViolation(
+                "readonly_dir mount requires readonly_data policy tier".into(),
+            ));
+        }
         let canon = requested
             .canonicalize()
             .map_err(|e| AegisError::CapabilityDenied(format!("Invalid mount path: {e}")))?;
@@ -107,6 +162,11 @@ impl SandboxPolicy {
     }
 
     pub fn validate_scratchpad_relative_path(rel: &str) -> Result<PathBuf, AegisError> {
+        if rel.contains('\\') {
+            return Err(AegisError::CapabilityDenied(format!(
+                "Backslash path '{rel}' rejected by scratchpad policy"
+            )));
+        }
         let candidate = Path::new(rel);
         let mut clean = PathBuf::new();
         for comp in candidate.components() {
@@ -128,7 +188,7 @@ impl SandboxPolicy {
         Ok(clean)
     }
 
-    /// Zero ambient authority: never calls inherit_env, inherit_network, or inherit_stdio.
+    /// Zero ambient authority: NEVER calls inherit_env, inherit_network, or inherit_stdio.
     pub fn build_wasi_p1(
         &self,
         stdin: MemoryInputPipe,

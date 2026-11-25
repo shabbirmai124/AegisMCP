@@ -1,6 +1,9 @@
-use boa_engine::{Context, JsValue, Source};
+use boa_engine::object::ObjectInitializer;
+use boa_engine::object::builtins::JsArray;
+use boa_engine::property::Attribute;
+use boa_engine::{Context, JsArgs, JsNativeError, JsResult, JsString, JsValue, NativeFunction, Source};
 use serde::{Deserialize, Serialize};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 
 #[derive(Deserialize)]
 struct GuestInput {
@@ -20,9 +23,10 @@ struct GuestOutput {
 }
 
 fn emit_output(out: &GuestOutput) {
-    if let Ok(json) = serde_json::to_string(out) {
-        println!("{json}");
-    }
+    let mut stdout = io::stdout().lock();
+    let _ = serde_json::to_writer(&mut stdout, out);
+    let _ = stdout.write_all(b"\n");
+    let _ = stdout.flush();
 }
 
 fn js_value_to_json(val: &JsValue, ctx: &mut Context) -> serde_json::Value {
@@ -33,6 +37,93 @@ fn js_value_to_json(val: &JsValue, ctx: &mut Context) -> serde_json::Value {
         return v;
     }
     serde_json::Value::String(val.display().to_string())
+}
+
+fn aegis_fs_read_file(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let path = args
+        .get_or_undefined(0)
+        .to_string(ctx)?
+        .to_std_string_escaped();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(JsValue::from(JsString::from(content))),
+        Err(err) => Err(JsNativeError::error()
+            .with_message(format!("CapabilityDenied: readFile('{path}') failed: {err}"))
+            .into()),
+    }
+}
+
+fn aegis_fs_write_file(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let path = args
+        .get_or_undefined(0)
+        .to_string(ctx)?
+        .to_std_string_escaped();
+    let content = args
+        .get_or_undefined(1)
+        .to_string(ctx)?
+        .to_std_string_escaped();
+    match std::fs::write(&path, content.as_bytes()) {
+        Ok(()) => Ok(JsValue::from(true)),
+        Err(err) => Err(JsNativeError::error()
+            .with_message(format!("CapabilityDenied: writeFile('{path}') failed: {err}"))
+            .into()),
+    }
+}
+
+fn aegis_fs_read_dir(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let path = args
+        .get_or_undefined(0)
+        .to_string(ctx)?
+        .to_std_string_escaped();
+    match std::fs::read_dir(&path) {
+        Ok(entries) => {
+            let mut names = Vec::new();
+            for entry in entries {
+                match entry {
+                    Ok(e) => names.push(e.file_name().to_string_lossy().into_owned()),
+                    Err(err) => {
+                        return Err(JsNativeError::error()
+                            .with_message(format!(
+                                "CapabilityDenied: readDir('{path}') entry error: {err}"
+                            ))
+                            .into());
+                    }
+                }
+            }
+            names.sort();
+            let js_vals: Vec<JsValue> = names
+                .into_iter()
+                .map(|n| JsValue::from(JsString::from(n)))
+                .collect();
+            let arr = JsArray::from_iter(js_vals, ctx);
+            Ok(arr.into())
+        }
+        Err(err) => Err(JsNativeError::error()
+            .with_message(format!("CapabilityDenied: readDir('{path}') failed: {err}"))
+            .into()),
+    }
+}
+
+fn register_aegis_fs(ctx: &mut Context) -> JsResult<()> {
+    let aegis_fs = ObjectInitializer::new(ctx)
+        .function(
+            NativeFunction::from_fn_ptr(aegis_fs_read_file),
+            JsString::from("readFile"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(aegis_fs_write_file),
+            JsString::from("writeFile"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(aegis_fs_read_dir),
+            JsString::from("readDir"),
+            1,
+        )
+        .build();
+
+    ctx.register_global_property(JsString::from("aegisFS"), aegis_fs, Attribute::READONLY)?;
+    Ok(())
 }
 
 fn main() {
@@ -61,13 +152,24 @@ fn main() {
     };
 
     let mut context = Context::default();
+    if let Err(err) = register_aegis_fs(&mut context) {
+        emit_output(&GuestOutput {
+            ok: false,
+            result: serde_json::Value::Null,
+            console_logs: Vec::new(),
+            error: Some(format!("Failed to register aegisFS bridge: {err}")),
+        });
+        return;
+    }
+
     let input_json = serde_json::to_string(&req.input).unwrap_or_else(|_| "null".to_string());
     let tier_json = serde_json::to_string(&req.tier.unwrap_or_else(|| "pure_compute".to_string()))
         .unwrap_or_else(|_| "\"pure_compute\"".to_string());
 
     let prelude = format!(
         r#"
-const input = {input_json};
+const INPUT = {input_json};
+const input = INPUT;
 const __AEGIS_TIER__ = {tier_json};
 const __logs = [];
 const console = {{

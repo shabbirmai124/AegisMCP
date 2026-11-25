@@ -10,51 +10,55 @@ pub const GENESIS_HASH: &str = "000000000000000000000000000000000000000000000000
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditRecordInput {
-    pub execution_id: String,
+    pub run_id: String,
     pub tool_name: String,
-    pub policy_tier: String,
-    pub classification: String,
+    pub tier: String,
+    pub input_sha256: String,
+    pub output_sha256: String,
     pub fuel_consumed: u64,
     pub fuel_budget: u64,
     pub peak_memory_bytes: usize,
-    pub duration_ms: u64,
-    pub code_sha256: String,
-    pub summary: String,
+    pub duration_us: u64,
+    pub cache_hit: bool,
+    pub status: String,
+    pub trap_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditRecord {
-    pub seq: i64,
-    pub execution_id: String,
+    pub id: i64,
+    pub run_id: String,
     pub timestamp_utc: String,
     pub tool_name: String,
-    pub policy_tier: String,
-    pub classification: String,
+    pub tier: String,
+    pub input_sha256: String,
+    pub output_sha256: String,
     pub fuel_consumed: u64,
     pub fuel_budget: u64,
     pub peak_memory_bytes: usize,
-    pub duration_ms: u64,
-    pub code_sha256: String,
+    pub duration_us: u64,
+    pub cache_hit: bool,
+    pub status: String,
+    pub trap_reason: Option<String>,
     pub prev_hash: String,
-    pub entry_hash: String,
-    pub summary: String,
+    pub receipt_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditReceipt {
-    pub seq: i64,
-    pub execution_id: String,
+    pub id: i64,
+    pub run_id: String,
     pub timestamp_utc: String,
     pub prev_hash: String,
-    pub entry_hash: String,
+    pub receipt_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainVerificationReport {
     pub valid: bool,
     pub total_records: usize,
-    pub broken_at_seq: Option<i64>,
-    pub broken_execution_id: Option<String>,
+    pub broken_at_id: Option<i64>,
+    pub broken_run_id: Option<String>,
     pub head_hash: String,
     pub message: String,
 }
@@ -88,22 +92,20 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn compute_entry_hash(
+pub fn compute_receipt_hash(
     prev_hash: &str,
-    execution_id: &str,
+    run_id: &str,
     timestamp_utc: &str,
     tool_name: &str,
-    policy_tier: &str,
-    classification: &str,
+    tier: &str,
+    input_sha256: &str,
+    output_sha256: &str,
     fuel_consumed: u64,
-    fuel_budget: u64,
     peak_memory_bytes: usize,
-    duration_ms: u64,
-    code_sha256: &str,
-    summary: &str,
+    status: &str,
 ) -> String {
     let payload = format!(
-        "{prev_hash}|{execution_id}|{timestamp_utc}|{tool_name}|{policy_tier}|{classification}|{fuel_consumed}|{fuel_budget}|{peak_memory_bytes}|{duration_ms}|{code_sha256}|{summary}"
+        "{prev_hash}|{run_id}|{timestamp_utc}|{tool_name}|{tier}|{input_sha256}|{output_sha256}|{fuel_consumed}|{peak_memory_bytes}|{status}"
     );
     sha256_hex(payload.as_bytes())
 }
@@ -115,22 +117,24 @@ fn configure_connection(conn: &Connection) -> Result<()> {
         PRAGMA synchronous = NORMAL;
         PRAGMA busy_timeout = 5000;
         CREATE TABLE IF NOT EXISTS executions (
-            seq INTEGER PRIMARY KEY AUTOINCREMENT,
-            execution_id TEXT NOT NULL UNIQUE,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT UNIQUE NOT NULL,
             timestamp_utc TEXT NOT NULL,
             tool_name TEXT NOT NULL,
-            policy_tier TEXT NOT NULL,
-            classification TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            input_sha256 TEXT NOT NULL,
+            output_sha256 TEXT NOT NULL,
             fuel_consumed INTEGER NOT NULL,
             fuel_budget INTEGER NOT NULL,
             peak_memory_bytes INTEGER NOT NULL,
-            duration_ms INTEGER NOT NULL,
-            code_sha256 TEXT NOT NULL,
+            duration_us INTEGER NOT NULL,
+            cache_hit INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            trap_reason TEXT,
             prev_hash TEXT NOT NULL,
-            entry_hash TEXT NOT NULL,
-            summary TEXT NOT NULL
+            receipt_hash TEXT NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_executions_exec_id ON executions(execution_id);
+        CREATE INDEX IF NOT EXISTS idx_executions_run_id ON executions(run_id);
         ",
     )?;
     Ok(())
@@ -150,7 +154,7 @@ impl AuditLedger {
 
         let initial_head: String = conn
             .query_row(
-                "SELECT entry_hash FROM executions ORDER BY seq DESC LIMIT 1",
+                "SELECT receipt_hash FROM executions ORDER BY id DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )
@@ -195,11 +199,11 @@ impl AuditLedger {
     }
 
     pub fn verify_chain(&self) -> Result<ChainVerificationReport> {
-        verify_sqlite_chain(&self.db_path)
+        verify_chain(&self.db_path)
     }
 
-    pub fn verify_receipt(&self, execution_id: &str) -> Result<ReceiptVerification> {
-        verify_sqlite_receipt(&self.db_path, execution_id)
+    pub fn verify_receipt(&self, run_id: &str) -> Result<ReceiptVerification> {
+        verify_receipt(&self.db_path, run_id)
     }
 
     pub fn recent(&self, limit: usize) -> Result<Vec<AuditRecord>> {
@@ -214,96 +218,98 @@ fn append_row(
 ) -> Result<AuditReceipt> {
     let timestamp_utc = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let prev_hash = head_hash.clone();
-    let entry_hash = compute_entry_hash(
+    let receipt_hash = compute_receipt_hash(
         &prev_hash,
-        &input.execution_id,
+        &input.run_id,
         &timestamp_utc,
         &input.tool_name,
-        &input.policy_tier,
-        &input.classification,
+        &input.tier,
+        &input.input_sha256,
+        &input.output_sha256,
         input.fuel_consumed,
-        input.fuel_budget,
         input.peak_memory_bytes,
-        input.duration_ms,
-        &input.code_sha256,
-        &input.summary,
+        &input.status,
     );
 
     conn.execute(
         "INSERT INTO executions (
-            execution_id, timestamp_utc, tool_name, policy_tier, classification,
-            fuel_consumed, fuel_budget, peak_memory_bytes, duration_ms, code_sha256,
-            prev_hash, entry_hash, summary
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            run_id, timestamp_utc, tool_name, tier, input_sha256, output_sha256,
+            fuel_consumed, fuel_budget, peak_memory_bytes, duration_us, cache_hit,
+            status, trap_reason, prev_hash, receipt_hash
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
-            input.execution_id,
+            input.run_id,
             timestamp_utc,
             input.tool_name,
-            input.policy_tier,
-            input.classification,
+            input.tier,
+            input.input_sha256,
+            input.output_sha256,
             input.fuel_consumed as i64,
             input.fuel_budget as i64,
             input.peak_memory_bytes as i64,
-            input.duration_ms as i64,
-            input.code_sha256,
+            input.duration_us as i64,
+            if input.cache_hit { 1i64 } else { 0i64 },
+            input.status,
+            input.trap_reason,
             prev_hash,
-            entry_hash,
-            input.summary,
+            receipt_hash,
         ],
     )?;
 
-    let seq = conn.last_insert_rowid();
-    *head_hash = entry_hash.clone();
+    let id = conn.last_insert_rowid();
+    *head_hash = receipt_hash.clone();
 
     Ok(AuditReceipt {
-        seq,
-        execution_id: input.execution_id,
+        id,
+        run_id: input.run_id,
         timestamp_utc,
         prev_hash,
-        entry_hash,
+        receipt_hash,
     })
 }
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRecord> {
     Ok(AuditRecord {
-        seq: row.get(0)?,
-        execution_id: row.get(1)?,
+        id: row.get(0)?,
+        run_id: row.get(1)?,
         timestamp_utc: row.get(2)?,
         tool_name: row.get(3)?,
-        policy_tier: row.get(4)?,
-        classification: row.get(5)?,
-        fuel_consumed: row.get::<_, i64>(6)? as u64,
-        fuel_budget: row.get::<_, i64>(7)? as u64,
-        peak_memory_bytes: row.get::<_, i64>(8)? as usize,
-        duration_ms: row.get::<_, i64>(9)? as u64,
-        code_sha256: row.get(10)?,
-        prev_hash: row.get(11)?,
-        entry_hash: row.get(12)?,
-        summary: row.get(13)?,
+        tier: row.get(4)?,
+        input_sha256: row.get(5)?,
+        output_sha256: row.get(6)?,
+        fuel_consumed: row.get::<_, i64>(7)? as u64,
+        fuel_budget: row.get::<_, i64>(8)? as u64,
+        peak_memory_bytes: row.get::<_, i64>(9)? as usize,
+        duration_us: row.get::<_, i64>(10)? as u64,
+        cache_hit: row.get::<_, i64>(11)? != 0,
+        status: row.get(12)?,
+        trap_reason: row.get(13)?,
+        prev_hash: row.get(14)?,
+        receipt_hash: row.get(15)?,
     })
 }
 
-pub fn verify_sqlite_chain(db_path: &Path) -> Result<ChainVerificationReport> {
+pub fn verify_chain(db_path: &Path) -> Result<ChainVerificationReport> {
     if !db_path.exists() {
         return Ok(ChainVerificationReport {
             valid: true,
             total_records: 0,
-            broken_at_seq: None,
-            broken_execution_id: None,
+            broken_at_id: None,
+            broken_run_id: None,
             head_hash: GENESIS_HASH.to_string(),
             message: "Ledger does not exist yet (0 records; genesis valid)".into(),
         });
     }
 
-    let conn = Connection::open(db_path)?;
-    configure_connection(&conn)?;
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
 
     let mut stmt = conn.prepare(
-        "SELECT seq, execution_id, timestamp_utc, tool_name, policy_tier, classification,
-                fuel_consumed, fuel_budget, peak_memory_bytes, duration_ms, code_sha256,
-                prev_hash, entry_hash, summary
+        "SELECT id, run_id, timestamp_utc, tool_name, tier, input_sha256, output_sha256,
+                fuel_consumed, fuel_budget, peak_memory_bytes, duration_us, cache_hit,
+                status, trap_reason, prev_hash, receipt_hash
          FROM executions
-         ORDER BY seq ASC",
+         ORDER BY id ASC",
     )?;
     let rows = stmt.query_map([], row_to_record)?;
 
@@ -318,60 +324,58 @@ pub fn verify_sqlite_chain(db_path: &Path) -> Result<ChainVerificationReport> {
             return Ok(ChainVerificationReport {
                 valid: false,
                 total_records,
-                broken_at_seq: Some(rec.seq),
-                broken_execution_id: Some(rec.execution_id),
+                broken_at_id: Some(rec.id),
+                broken_run_id: Some(rec.run_id),
                 head_hash: expected_prev.clone(),
                 message: format!(
-                    "Chain link mismatch at seq {}: expected prev_hash {}, found {}",
-                    rec.seq, expected_prev, rec.prev_hash
+                    "Chain link mismatch at row id {}: expected prev_hash {}, found {}",
+                    rec.id, expected_prev, rec.prev_hash
                 ),
             });
         }
 
-        let recomputed = compute_entry_hash(
+        let recomputed = compute_receipt_hash(
             &rec.prev_hash,
-            &rec.execution_id,
+            &rec.run_id,
             &rec.timestamp_utc,
             &rec.tool_name,
-            &rec.policy_tier,
-            &rec.classification,
+            &rec.tier,
+            &rec.input_sha256,
+            &rec.output_sha256,
             rec.fuel_consumed,
-            rec.fuel_budget,
             rec.peak_memory_bytes,
-            rec.duration_ms,
-            &rec.code_sha256,
-            &rec.summary,
+            &rec.status,
         );
 
-        if rec.entry_hash != recomputed {
+        if rec.receipt_hash != recomputed {
             return Ok(ChainVerificationReport {
                 valid: false,
                 total_records,
-                broken_at_seq: Some(rec.seq),
-                broken_execution_id: Some(rec.execution_id),
+                broken_at_id: Some(rec.id),
+                broken_run_id: Some(rec.run_id),
                 head_hash: expected_prev,
                 message: format!(
-                    "Hash tamper detected at seq {}: stored {}, recomputed {}",
-                    rec.seq, rec.entry_hash, recomputed
+                    "Hash tamper detected at row id {}: stored {}, recomputed {}",
+                    rec.id, rec.receipt_hash, recomputed
                 ),
             });
         }
 
-        expected_prev = rec.entry_hash;
+        expected_prev = rec.receipt_hash;
     }
 
     Ok(ChainVerificationReport {
         valid: true,
         total_records,
-        broken_at_seq: None,
-        broken_execution_id: None,
+        broken_at_id: None,
+        broken_run_id: None,
         head_hash: expected_prev,
         message: format!("Hash chain verified cleanly across {total_records} record(s)"),
     })
 }
 
-pub fn verify_sqlite_receipt(db_path: &Path, execution_id: &str) -> Result<ReceiptVerification> {
-    let chain_report = verify_sqlite_chain(db_path)?;
+pub fn verify_receipt(db_path: &Path, run_id: &str) -> Result<ReceiptVerification> {
+    let chain_report = verify_chain(db_path)?;
     if !db_path.exists() {
         return Ok(ReceiptVerification {
             found: false,
@@ -386,36 +390,34 @@ pub fn verify_sqlite_receipt(db_path: &Path, execution_id: &str) -> Result<Recei
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     let record: Option<AuditRecord> = conn
         .query_row(
-            "SELECT seq, execution_id, timestamp_utc, tool_name, policy_tier, classification,
-                    fuel_consumed, fuel_budget, peak_memory_bytes, duration_ms, code_sha256,
-                    prev_hash, entry_hash, summary
+            "SELECT id, run_id, timestamp_utc, tool_name, tier, input_sha256, output_sha256,
+                    fuel_consumed, fuel_budget, peak_memory_bytes, duration_us, cache_hit,
+                    status, trap_reason, prev_hash, receipt_hash
              FROM executions
-             WHERE execution_id = ?1",
-            params![execution_id],
+             WHERE run_id = ?1",
+            params![run_id],
             row_to_record,
         )
         .ok();
 
     let found = record.is_some();
-    let receipt_valid = match (&record, chain_report.broken_at_seq) {
+    let receipt_valid = match (&record, chain_report.broken_at_id) {
         (Some(rec), None) => {
-            let expected = compute_entry_hash(
+            let expected = compute_receipt_hash(
                 &rec.prev_hash,
-                &rec.execution_id,
+                &rec.run_id,
                 &rec.timestamp_utc,
                 &rec.tool_name,
-                &rec.policy_tier,
-                &rec.classification,
+                &rec.tier,
+                &rec.input_sha256,
+                &rec.output_sha256,
                 rec.fuel_consumed,
-                rec.fuel_budget,
                 rec.peak_memory_bytes,
-                rec.duration_ms,
-                &rec.code_sha256,
-                &rec.summary,
+                &rec.status,
             );
-            rec.entry_hash == expected
+            rec.receipt_hash == expected
         }
-        (Some(rec), Some(broken_seq)) => rec.seq < broken_seq,
+        (Some(rec), Some(broken_id)) => rec.id < broken_id,
         (None, _) => false,
     };
 
@@ -436,11 +438,11 @@ pub fn read_recent_records(db_path: &Path, limit: usize) -> Result<Vec<AuditReco
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     let mut stmt = conn.prepare(
-        "SELECT seq, execution_id, timestamp_utc, tool_name, policy_tier, classification,
-                fuel_consumed, fuel_budget, peak_memory_bytes, duration_ms, code_sha256,
-                prev_hash, entry_hash, summary
+        "SELECT id, run_id, timestamp_utc, tool_name, tier, input_sha256, output_sha256,
+                fuel_consumed, fuel_budget, peak_memory_bytes, duration_us, cache_hit,
+                status, trap_reason, prev_hash, receipt_hash
          FROM executions
-         ORDER BY seq DESC
+         ORDER BY id DESC
          LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit as i64], row_to_record)?;
