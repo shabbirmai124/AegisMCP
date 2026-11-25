@@ -47,18 +47,148 @@ Callers may tighten `memory_mb` or `fuel_budget` per call, but may **never** rai
 
 ---
 
-## Build & Verification
+## Running on Windows (Step-by-Step PowerShell Guide)
 
-```bash
-# Linux / macOS
-chmod +x scripts/build_all.sh
-./scripts/build_all.sh
+### Step 1: Install Prerequisites on Windows 10 / 11
 
-# Windows (PowerShell)
-./scripts/build_all.ps1
+1. **Install Visual Studio C++ Build Tools** (required by Rust's MSVC linker and `rusqlite` bundled SQLite compilation):
+   - Download **Build Tools for Visual Studio** from https://visualstudio.microsoft.com/visual-cpp-build-tools/
+   - Run the installer and check **"Desktop development with C++"**, then click **Install**.
+2. **Install Rust (`rustup` + `cargo`):**
+   - Download and run `rustup-init.exe` from https://rustup.rs/ (or install via Winget in PowerShell):
+     ```powershell
+     winget install Rustlang.Rustup
+     ```
+   - Close and reopen **Windows Terminal / PowerShell** so `cargo`, `rustc`, and `rustup` are in your `PATH`.
+3. **Verify your Rust toolchain in PowerShell:**
+   ```powershell
+   rustc --version
+   cargo --version
+   rustup --version
+   ```
+   *(Requires Rust `1.85+` for Rust Edition `2024`. Run `rustup update stable` if you have an older version.)*
+
+### Step 2: Open the Repository Folder in PowerShell
+
+```powershell
+cd C:\path\to\aegis-mcp
 ```
 
-Manual step-by-step build & verification:
+### Step 3: One-Command Full Build, Lint, Test & Diagnostics (Recommended)
+
+Run the bundled PowerShell build script (uses `-ExecutionPolicy Bypass` so Windows does not block local `.ps1` scripts):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_all.ps1
+```
+
+This single script automatically:
+1. Installs the `wasm32-wasip1` Rust compilation target.
+2. Compiles the isolated JavaScript WASI guest (`crates/aegis-guest-js`) in release mode (`target\wasm32-wasip1\release\aegis-guest-js.wasm`).
+3. Runs `cargo clippy --all-targets -- -D warnings` (strict zero-warning check).
+4. Compiles the native Windows host binary (`target\release\aegis-mcp.exe`).
+5. Runs all **8 red-team security & tamper-detection integration tests**.
+6. Precompiles the AOT `.cwasm` cache (`precompile`) and runs the live `2 + 2` Wasmtime sandbox check (`doctor`).
+
+### Step 4: Manual Step-by-Step Windows Commands
+
+If you prefer running each step individually in PowerShell:
+
+```powershell
+# 1. Add the WebAssembly WASI Preview 1 target
+rustup target add wasm32-wasip1
+
+# 2. Build the WASI JavaScript guest binary (.wasm)
+cargo build --target wasm32-wasip1 --manifest-path crates/aegis-guest-js/Cargo.toml --release
+
+# 3. Run strict Clippy lint checks on the host crate
+cargo clippy --manifest-path crates/aegis-host/Cargo.toml --all-targets -- -D warnings
+
+# 4. Build the release Windows executable (target\release\aegis-mcp.exe)
+cargo build --manifest-path crates/aegis-host/Cargo.toml --release
+
+# 5. Run all 8 real red-team security tests
+cargo test --manifest-path crates/aegis-host/Cargo.toml -- --nocapture
+
+# 6. Precompile .wasm -> SHA-256 verified .cwasm AOT cache
+.\target\release\aegis-mcp.exe precompile --config aegis.toml
+
+# 7. Run self-diagnostics and verify sub-5ms warm Wasmtime execution
+.\target\release\aegis-mcp.exe doctor --config aegis.toml
+```
+
+### Step 5: Run the MCP Server & Live Terminal Flight Recorder on Windows
+
+Open **two Windows Terminal / PowerShell tabs** inside the project directory:
+
+**Tab 1 — Start the Headless MCP Server (`stdio` JSON-RPC):**
+```powershell
+.\target\release\aegis-mcp.exe serve --config aegis.toml --db audit.db --transport stdio
+```
+*(All diagnostic logs go strictly to `stderr`; `stdout` is reserved exclusively for MCP JSON-RPC frames.)*
+
+**Tab 2 — Launch the Live `ratatui` Terminal Flight Recorder:**
+```powershell
+.\target\release\aegis-mcp.exe monitor --db audit.db --refresh-ms 100
+```
+- Use `Up` / `Down` or `j` / `k` to inspect executions and SHA-256 receipts.
+- Press `f` to cycle filters (`All` / `Pass` / `Trapped` / `Blocked`).
+- Press `v` to run live cryptographic SHA-256 hash-chain verification.
+- Press `q` or `Esc` to exit cleanly.
+
+**Verify the Audit Hash Chain Anytime:**
+```powershell
+# Verify entire SQLite WAL ledger
+.\target\release\aegis-mcp.exe verify --db audit.db
+
+# Verify a specific execution receipt UUID
+.\target\release\aegis-mcp.exe verify --db audit.db --run-id <run-uuid>
+```
+
+### Step 6: Connect Claude Desktop, Cursor, or Gemini CLI on Windows
+
+Use **forward slashes (`/` or escaped `\\`)** with the full Windows path to `aegis-mcp.exe`:
+
+- **Claude Desktop** (`%APPDATA%\Claude\claude_desktop_config.json`):
+  ```json
+  {
+    "mcpServers": {
+      "aegis-mcp": {
+        "command": "C:\\path\\to\\aegis-mcp\\target\\release\\aegis-mcp.exe",
+        "args": [
+          "serve",
+          "--config",
+          "C:\\path\\to\\aegis-mcp\\aegis.toml",
+          "--db",
+          "C:\\path\\to\\aegis-mcp\\audit.db"
+        ]
+      }
+    }
+  }
+  ```
+- **Interactive Testing with MCP Inspector on Windows** (optional, requires Node.js on your PC only to run the external inspector tool):
+  ```powershell
+  npx @modelcontextprotocol/inspector .\target\release\aegis-mcp.exe serve --config aegis.toml --db audit.db
+  ```
+
+### Windows Troubleshooting
+
+- **`linker 'link.exe' not found`:** Install Visual Studio Build Tools with the **"Desktop development with C++"** workload, then restart PowerShell.
+- **`running scripts is disabled on this system`:** Run with `powershell -ExecutionPolicy Bypass -File .\scripts\build_all.ps1`.
+- **Slow first compile:** The initial release build compiles `wasmtime` (Cranelift), `boa_engine`, and bundled SQLite (`rusqlite`) from source (~2–4 minutes). Subsequent incremental builds take only a few seconds.
+- **TUI box characters look misaligned:** Use **Windows Terminal** (recommended) instead of legacy `cmd.exe` for full UTF-8/Unicode sparkline and border rendering.
+
+---
+
+## Running on Linux / macOS
+
+```bash
+# One-command build, lint, test, precompile, and doctor
+chmod +x scripts/build_all.sh
+./scripts/build_all.sh
+```
+
+Manual Linux / macOS commands:
 
 ```bash
 rustup target add wasm32-wasip1
@@ -70,42 +200,20 @@ cargo test --manifest-path crates/aegis-host/Cargo.toml -- --nocapture
 ./target/release/aegis-mcp doctor --config aegis.toml
 ```
 
----
-
-## CLI Usage
+CLI usage on Linux / macOS:
 
 ```bash
-# 1. Start the MCP server (pure JSON-RPC on stdout; tracing logs on stderr)
+# Start MCP server over stdio
 ./target/release/aegis-mcp serve --config aegis.toml --db audit.db --transport stdio
 
-# 2. Launch the native ratatui Terminal Flight Recorder (polls WAL every 100ms)
+# Launch native ratatui Terminal Flight Recorder
 ./target/release/aegis-mcp monitor --db audit.db --refresh-ms 100
 
-# 3. Precompile guest .wasm into SHA-256-verified .cwasm AOT cache
-./target/release/aegis-mcp precompile --config aegis.toml --force
-
-# 4. Verify the full SHA-256 hash chain (or a single run_id receipt)
+# Verify SHA-256 hash chain
 ./target/release/aegis-mcp verify --db audit.db
-./target/release/aegis-mcp verify --db audit.db --run-id <uuid>
-
-# 5. Run full environment, cache, WAL, and live 2+2 Wasmtime latency diagnostics
-./target/release/aegis-mcp doctor --config aegis.toml
 ```
 
----
-
-## Client Integration & MCP Inspector
-
-Ready-to-paste client configurations are provided in:
-- `configs/claude_desktop_config.json` — Claude Desktop
-- `configs/gemini_cli_settings.json` — Gemini CLI
-- `configs/cursor_mcp.json` — Cursor
-
-Interactive verification with the official MCP Inspector:
-
-```bash
-npx @modelcontextprotocol/inspector ./target/release/aegis-mcp serve --config aegis.toml --db audit.db
-```
+Ready-to-paste client configs are included in `configs/claude_desktop_config.json`, `configs/gemini_cli_settings.json`, and `configs/cursor_mcp.json`.
 
 ---
 
