@@ -1,0 +1,39 @@
+[package]
+name = "aegis-host"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "aegis-mcp"
+path = "src/main.rs"
+
+[features]
+default = []
+http = ["rmcp/transport-streamable-http-server"]
+
+[dependencies]
+rmcp = { version = "3.11", features = ["server", "macros", "schemars", "transport-io"] }
+wasmtime = { version = "51.0", features = ["async", "cranelift", "pooling-allocator", "cache"] }
+wasmtime-wasi = "51.0"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+serde.workspace = true
+serde_json.workspace = true
+schemars = "1.0"
+toml = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
+tempfile = "3"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+url = "2"
+ratatui = "0.30"
+crossterm = "0.29"
+anyhow.workspace = true
+thiserror.workspace = true

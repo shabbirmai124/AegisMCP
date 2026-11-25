@@ -1,0 +1,7 @@
+/target/
+/.cache/
+audit.db
+audit.db-wal
+audit.db-shm
+*.cwasm
+.DS_Store

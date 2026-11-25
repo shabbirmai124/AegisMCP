@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "aegis-mcp": {
+      "command": "./target/release/aegis-mcp",
+      "args": [
+        "serve",
+        "--config",
+        "./aegis.toml",
+        "--db",
+        "./audit.db"
+      ]
+    }
+  }
+}
